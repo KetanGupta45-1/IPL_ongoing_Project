@@ -1,0 +1,376 @@
+import pandas as pd
+import numpy as np
+import math
+df = pd.read_csv("match_data_23-24.csv")
+# Convert 'Date' to datetime
+df['Date'] = pd.to_datetime(df['Date'])
+
+# Extract year
+df['Year'] = df['Date'].dt.year
+
+# Create a unique integer Match ID using factorize on (Year, Match No.)
+df['Match ID'], _ = pd.factorize(df[['Year', 'Match No.']].apply(tuple, axis=1))
+
+df.columns
+
+df['pair'] = df[['Striker', 'Non Striker']].apply(lambda row: tuple(sorted(row)), axis=1)
+
+df['prev_pair'] = df['pair'].shift(1)
+df['prev_innings'] = df['Innings No.'].shift(1)
+
+df['is_wicket'] = (
+    (df['Innings No.'] == df['prev_innings']) &
+    (df['pair'] != df['prev_pair'])
+).astype(int)
+
+print(df.columns)
+df.head()
+
+df.drop(columns= ['pair', 'prev_pair', 'prev_innings'], inplace=True)
+df.head()
+
+df['Total Wickets'] = df.groupby(['Match ID', 'Innings No.'])['is_wicket'].cumsum()
+df.head()
+
+def is_legal(extras_dict):
+    return not any(k in extras_dict for k in ['wides', 'noballs'])
+
+df['is_legal_delivery'] = df['Extras'].apply(is_legal)
+df['Team Balls Count'] = df.groupby(['Match ID', 'Innings No.'])['is_legal_delivery'].cumsum()
+
+def striker_legal(extras_dict):
+    return 'wides' not in extras_dict
+
+df['striker_legal_delivery'] = df['Extras'].apply(striker_legal)
+df['Striker Balls Count'] = df.groupby(['Match ID', 'Innings No.', 'Striker'])['striker_legal_delivery'].cumsum()
+df.drop(columns=['striker_legal_delivery'], inplace=True)
+
+
+df.drop(columns=['Year'])
+df['Date'] = df['Date'].dt.date
+df.head()
+
+df["Team Balls Left"] = 120 - df["Team Balls Count"]
+df.head()
+
+df['Batsman Runs on Previous Ball'] = df.groupby(['Match ID', 'Innings No.'])['Runs by Batsman'].shift(1)
+df['Total Runs on Previous Ball'] = df.groupby(['Match ID', 'Innings No.'])['Total Runs (Ball)'].shift(1)
+
+df['Batsman Runs on Previous Ball'] = df['Batsman Runs on Previous Ball'].fillna(0).astype(int)
+df['Total Runs on Previous Ball'] = df['Total Runs on Previous Ball'].fillna(0).astype(int)
+
+
+def categorize_over(over):
+    over_num = int(str(over).split('.')[0])
+    if over_num < 6:
+        return 1  # Powerplay
+    elif over_num < 16:
+        return 2  # Middle
+    else:
+        return 3  # Death
+
+df['Over_Phase'] = df['Over'].apply(categorize_over)
+
+
+df['Striker Strike Rate'] = (df['Cumulative Runs by Batsman'] / df['Striker Balls Count']) * 100
+df['Striker Strike Rate'] = df['Striker Strike Rate'].fillna(method='ffill').round(2)
+df.head(10)
+
+df.rename(columns={"Total Runs (Ball)": "Total runs on that bowl"}, inplace=True)
+
+
+df['Partnership ID'] = df.groupby(['Match ID', 'Innings No.'])['is_wicket'].cumsum()
+df['Partnership Runs'] = df.groupby(['Match ID', 'Innings No.', 'Partnership ID'])['Runs by Batsman'].cumsum()
+df.head()
+
+
+df.drop(columns = ['Partnership ID'], inplace=True)
+
+for i in range(len(df)):
+    if df.loc[i, 'is_legal_delivery'] and df.loc[i, 'Runs by Batsman'] == 0:
+        df.loc[i, 'is_dot'] = 1
+    else:
+        df.loc[i, 'is_dot'] = 0
+
+df.is_dot = df.is_dot.fillna(0).astype(int)
+
+
+df['Dot Count'] = df.groupby(['Match ID', 'Innings No.'])['is_dot'].cumsum()
+df['Dot Count'] = df['Dot Count'].fillna(0).astype(int)
+df
+
+for i in range(len(df)):
+    if df.loc[i, 'is_legal_delivery'] and (df.loc[i, 'Runs by Batsman'] == 4 or df.loc[i, 'Runs by Batsman'] == 6):
+        df.loc[i, 'is_boundary'] = 1
+    else:
+        df.loc[i, 'is_boundary'] = 0
+
+df.is_boundary = df.is_boundary.fillna(0).astype(int)
+
+
+df['Boundary Count'] = df.groupby(['Match ID', 'Innings No.'])['is_boundary'].cumsum()
+df['Boundary Count'] = df['Boundary Count'].fillna(0).astype(int)
+df
+
+buffer_sizes = [3, 4, 5, 6]
+
+for size in buffer_sizes:
+    runs_buffer = []
+    column_name = f'Average Striker Runs {size}'
+
+    for i in range(len(df)):
+        if df.loc[i, 'Over'] == 0.0:
+            runs_buffer = []
+            df.loc[i, column_name] = 0.0
+        else:
+            if runs_buffer:
+                avg = sum(runs_buffer) / len(runs_buffer)
+            else:
+                avg = 0.0
+            df.loc[i, column_name] = avg
+
+        runs_buffer.append(df.loc[i, 'Runs by Batsman'])
+
+        if len(runs_buffer) > size:
+            runs_buffer.pop(0)
+
+
+buffer_sizes = [3, 6]
+
+for size in buffer_sizes:
+    runs_buffer = []
+
+    column_name = f'Average Conceded Runs by Bowler {size}'
+
+    for i in range(len(df)):
+        if df.loc[i, 'Over'] == 0.0:
+            runs_buffer = []
+            df.loc[i, column_name] = 0.0
+        else:
+            if runs_buffer:
+                avg = sum(runs_buffer) / len(runs_buffer)
+            else:
+                avg = 0.0
+            df.loc[i, column_name] = avg
+
+        runs_buffer.append(df.loc[i, 'Runs Conceded by Bowler'])
+
+        if len(runs_buffer) > size:
+            runs_buffer.pop(0)
+
+
+df['Average Conceded Runs by Bowler 3'] = df['Average Conceded Runs by Bowler 3'].round(2)
+df['Average Conceded Runs by Bowler 6'] = df['Average Conceded Runs by Bowler 6'].round(2)
+df['Average Striker Runs 3'] = df['Average Striker Runs 3'].round(2)
+df['Average Striker Runs 4'] = df['Average Striker Runs 4'].round(2)
+df['Average Striker Runs 5'] = df['Average Striker Runs 5'].round(2)
+df['Average Striker Runs 6'] = df['Average Striker Runs 6'].round(2)
+
+
+for i in range(10796, 10914):
+    df.loc[i, 'Bowling Team'] = 'Chennai Super Kings'
+
+
+first_innings = df[df["Innings No."] == 1]
+targets = first_innings.groupby("Match ID")["Cumulative Team Runs"].max().rename("Target")
+df = df.merge(targets, on="Match ID", how="left")
+df["Target"] = df.apply(lambda row: row["Target"] if row["Innings No."] == 2 else None, axis=1)
+
+df
+
+
+
+# Your original target dictionary
+Runs = {
+    "Narendra Modi Stadium, Ahmedabad": 200,
+    "Eden Gardens, Kolkata": 180,
+    "Wankhede Stadium, Mumbai": 180,
+    "Punjab Cricket Association IS Bindra Stadium, Mohali, Chandigarh": 185,
+    "Bharat Ratna Shri Atal Bihari Vajpayee Ekana Cricket Stadium, Lucknow": 170,
+    "Rajiv Gandhi International Stadium, Uppal, Hyderabad": 200,
+    "M Chinnaswamy Stadium, Bengaluru": 210,
+    "MA Chidambaram Stadium, Chepauk, Chennai": 205,
+    "Arun Jaitley Stadium, Delhi": 170,
+    "Barsapara Cricket Stadium, Guwahati": 195,
+    "Dr. Y.S. Rajasekhara Reddy ACA-VDCA Cricket Stadium, Visakhapatnam": 190,
+    "Maharaja Yadavindra Singh International Cricket Stadium, Mullanpur": 175,
+    "Sawai Mansingh Stadium, Jaipur": 165,
+    "Himachal Pradesh Cricket Association Stadium, Dharamsala": 200
+}
+
+# Reset
+venue_history = {}      # Tracks past actual scores only
+match_targets = {}      # Final computed target per match
+
+# Get unique 1st innings Match IDs in order
+match_ids = df[df["Innings No."] == 1]["Match ID"].drop_duplicates()
+
+for match_id in match_ids:
+    match_df = df[(df["Match ID"] == match_id) & (df["Innings No."] == 1)]
+    venue = match_df["Venue"].iloc[0]
+    final_score = match_df["Cumulative Team Runs"].max()
+
+    # Get past scores and original target
+    past_scores = venue_history.get(venue, [])
+    base = []
+
+    # Always include the static target if it exists
+    if venue in Runs:
+        base.append(Runs[venue])
+
+    base.extend(past_scores)
+
+    # Determine new target
+    if base:
+        target = sum(base) / len(base)
+        math.ceil(target)
+    else:
+        target = None
+
+    # Store target and update history
+    match_targets[match_id] = target
+    venue_history.setdefault(venue, []).append(final_score)
+
+# Assign to DataFrame
+for match_id, target in match_targets.items():
+    df.loc[(df["Match ID"] == match_id) & (df["Innings No."] == 1), "Target"] = target
+
+
+
+
+df['wicket_remaining'] = 10 - df['Total Wickets']
+df['Resources Remaining'] = df['wicket_remaining'] / 10.0
+df.head()
+
+
+df["Bowling Style"] = df["Bowler"].map(bowling_styles)
+df.head()
+
+categorical_cols = [col for col in df.columns if df[col].dtype == 'object']
+
+encoders = {}
+
+for col in categorical_cols:
+    if col not in ['Date', 'Extras']:
+        encoder = LabelEncoder()
+        new_col = col + " ID"
+        df[new_col] = encoder.fit_transform(df[col])
+        encoders[col] = encoder
+
+df.head()
+
+df["is_legal_delivery"] = df["is_legal_delivery"].map({True: 1, False: 0})
+df.head()
+
+
+def adjust_target_and_compute_crr(row):
+    target = row["Target"]
+    balls = row["Team Balls Count"]
+    runs = row["Cumulative Team Runs"]
+    extras = row["Extras"]
+
+    # Adjust target if this is the first ball and it's an illegal delivery
+    if balls == 0 and isinstance(extras, dict):
+        for k, v in extras.items():
+            if k in {"wides", "noballs", "legbyes", "byes"}:  # you can adjust keys as needed
+                target -= v
+
+    # Calculate CRR per ball
+    crr = runs / balls if balls > 0 else 0
+
+    return pd.Series({"Adjusted Target": target, "Current Run Rate": crr})
+
+df[["Target", "Current Run Rate"]] = df.apply(adjust_target_and_compute_crr, axis=1)
+
+df['Req. Run Rate'] = (df['Target'] - df['Cumulative Team Runs']) / df['Team Balls Left']
+df['Req. Run Rate'] = df['Req. Run Rate'].clip(lower=-150, upper=150)
+df.head()
+
+
+df["Pressure Index"] = df.apply(
+    lambda row: (
+        # α: Based on Required Run Rate
+        (0.4 if row["Req. Run Rate"] <= 10 else
+         (0.48 if row["Req. Run Rate"] <= 11 else
+          (0.56 if row["Req. Run Rate"] <= 12 else
+           (0.64 if row["Req. Run Rate"] <= 13 else
+            (0.72 if row["Req. Run Rate"] <= 14 else
+             (0.80 if row["Req. Run Rate"] <= 15 else
+              (0.88 if row["Req. Run Rate"] <= 16 else
+               (0.92 if row["Req. Run Rate"] <= 17 else 0.96)))))))) *
+        ((row["Req. Run Rate"] / (row["Current Run Rate"] if row["Current Run Rate"] != 0 else 0.01)) *
+         (row["Team Balls Count"] / 120))
+
+        +
+
+        # β: Based on Total Wickets
+        ((0.3 if row["Total Wickets"] <= 4 else
+          (0.45 if row["Total Wickets"] == 5 else
+           (0.6 if row["Total Wickets"] == 6 else
+            (0.75 if row["Total Wickets"] == 7 else
+             (0.9 if row["Total Wickets"] >= 8 else 0.3))))) *
+         (row["Total Wickets"] / 10))
+
+        +
+
+        # γ: Based on Dot Count
+        ((0.2 if row['Dot Count'] < 20 else
+          (0.3 if row['Dot Count'] < 25 else
+           (0.45 if row['Dot Count'] < 30 else
+            (0.6 if row['Dot Count'] < 35 else
+             (0.75 if row['Dot Count'] < 40 else 0.9))))) * row['Dot Count'])
+    ),
+    axis=1
+)
+
+
+
+df['Previous Average Striker Runs 3'] = df.groupby(['Match ID', 'Innings No.'])['Average Striker Runs 3'].shift(1)
+df['Previous Average Striker Runs 3'] = df['Previous Average Striker Runs 3'].fillna(0)
+
+df['Previous Average Striker Runs 4'] = df.groupby(['Match ID', 'Innings No.'])['Average Striker Runs 4'].shift(1)
+df['Previous Average Striker Runs 4'] = df['Previous Average Striker Runs 4'].fillna(0)
+
+df['Previous Average Striker Runs 5'] = df.groupby(['Match ID', 'Innings No.'])['Average Striker Runs 5'].shift(1)
+df['Previous Average Striker Runs 5'] = df['Previous Average Striker Runs 5'].fillna(0)
+
+df['Previous Average Striker Runs 6'] = df.groupby(['Match ID', 'Innings No.'])['Average Striker Runs 6'].shift(1)
+df['Previous Average Striker Runs 6'] = df['Previous Average Striker Runs 6'].fillna(0)
+
+df['Previous Average Conceded Runs by Bowler 3'] = df.groupby(['Match ID', 'Innings No.'])['Average Conceded Runs by Bowler 3'].shift(1)
+df['Previous Average Conceded Runs by Bowler 3'] = df['Previous Average Conceded Runs by Bowler 3'].fillna(0)
+
+df['Previous Average Conceded Runs by Bowler 6'] = df.groupby(['Match ID', 'Innings No.'])['Average Conceded Runs by Bowler 6'].shift(1)
+df['Previous Average Conceded Runs by Bowler 6'] = df['Previous Average Conceded Runs by Bowler 6'].fillna(0)
+
+df['Previous Current Run Rate'] = df.groupby(['Match ID', 'Innings No.'])['Current Run Rate'].shift(1)
+df['Previous Current Run Rate'] = df['Previous Current Run Rate'].fillna(0)
+
+df['Previous Pressure Index'] = df.groupby(['Match ID', 'Innings No.'])['Pressure Index'].shift(1)
+df['Previous Pressure Index'] = df['Previous Pressure Index'].fillna(2)
+
+df['Previous Wickets Remaining'] = df.groupby(['Match ID', 'Innings No.'])['wicket_remaining'].shift(1)
+df['Previous Wickets Remaining'] = df['Previous Wickets Remaining'].fillna(10)
+
+df['Run Conceded by bowler on prev Bowl'] = df.groupby(['Match ID', 'Innings No.'])['Runs Conceded by Bowler'].shift(1)
+df['Run Conceded by bowler on prev Bowl'] = df['Run Conceded by bowler on prev Bowl'].fillna(0)
+
+
+legal_deliveries = df[df['is_legal_delivery'] == 1]
+
+economy = legal_deliveries.groupby(['Match ID', 'Innings No.', 'Bowler']).agg(
+    Total_Runs_Conceded=('Runs Conceded by Bowler', 'sum'),
+    Legal_Balls=('is_legal_delivery', 'count')
+).reset_index()
+
+economy['Bowler Economy'] = economy['Total_Runs_Conceded'] / (economy['Legal_Balls'] / 6)
+
+# Step 4: Merge back into df
+df = df.merge(economy[['Match ID', 'Innings No.', 'Bowler', 'Bowler Economy']],
+              on=['Match ID', 'Innings No.', 'Bowler'], how='left')
+
+
+df['Bowler Economy till prev ball'] = df.groupby(['Match ID', 'Innings No.'])['Bowler Economy'].shift(1)
+df['Bowler Economy till prev ball'] = df['Bowler Economy till prev ball'].fillna(0)
+
+df.to_csv("Antim_Dataset.csv", index = False)
